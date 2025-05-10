@@ -139,24 +139,28 @@ export function PodcastProvider({ children }: { children: ReactNode }) {
       //console.log("Loading data for user:", user.id)
 
       try {
-        // Load podcasts
-        const { data: podcastsData, error: podcastsError } = await supabase
-          .from("podcasts")
-          .select("*")
+        // Load user's podcasts using the junction table
+        const { data: userPodcastsData, error: userPodcastsError } = await supabase
+          .from("user_podcasts")
+          .select("podcast_id, created_at, podcasts(*)")
           .eq("user_id", user.id)
           .order("created_at", { ascending: false })
 
-        if (podcastsError) {
-          console.error("Error loading podcasts:", podcastsError)
-          throw podcastsError
+        if (userPodcastsError) {
+          console.error("Error loading user podcasts:", userPodcastsError)
+          throw userPodcastsError
         }
 
-        //console.log(`Loaded ${podcastsData.length} podcasts`)
+        //console.log(`Loaded ${userPodcastsData.length} podcasts`)
 
         // Load episodes for each podcast
         const loadedPodcasts: Podcast[] = []
 
-        for (const podcast of podcastsData) {
+        for (const userPodcast of userPodcastsData) {
+          const podcast = userPodcast.podcasts
+
+          if (!podcast) continue
+
           const { data: episodesData, error: episodesError } = await supabase
             .from("episodes")
             .select("*")
@@ -168,20 +172,44 @@ export function PodcastProvider({ children }: { children: ReactNode }) {
             throw episodesError
           }
 
-          const episodes: Episode[] = episodesData.map((ep) => ({
-            id: ep.id,
-            title: ep.title,
-            description: ep.description || "",
-            audioUrl: ep.audio_url,
-            imageUrl: ep.image_url || podcast.image_url || "",
-            pubDate: ep.pub_date || "",
-            duration: ep.duration || "",
-            podcastId: podcast.id,
-            podcastTitle: podcast.title,
-            played: ep.played || false,
-            progress: ep.progress || 0,
-            lastPlayed: ep.last_played ? new Date(ep.last_played).getTime() : undefined,
-          }))
+          // Load user-specific episode data
+          const { data: userEpisodesData, error: userEpisodesError } = await supabase
+            .from("user_episodes")
+            .select("*")
+            .eq("user_id", user.id)
+            .in(
+              "episode_id",
+              episodesData.map((ep) => ep.id),
+            )
+
+          if (userEpisodesError) {
+            console.error("Error loading user episodes:", userEpisodesError)
+            throw userEpisodesError
+          }
+
+          // Create a map of episode_id to user episode data for quick lookup
+          const userEpisodesMap = new Map(userEpisodesData.map((userEp) => [userEp.episode_id, userEp]))
+
+          const episodes: Episode[] = episodesData.map((ep) => {
+            // Get user-specific data for this episode, if it exists
+            const userEpisode = userEpisodesMap.get(ep.id)
+
+            return {
+              id: ep.id,
+              title: ep.title,
+              description: ep.description || "",
+              audioUrl: ep.audio_url,
+              imageUrl: ep.image_url || podcast.image_url || "",
+              pubDate: ep.pub_date || "",
+              duration: ep.duration || "",
+              podcastId: podcast.id,
+              podcastTitle: podcast.title,
+              // Use user-specific data if available, otherwise use defaults
+              played: userEpisode?.played || false,
+              progress: userEpisode?.progress || 0,
+              lastPlayed: userEpisode?.last_played ? new Date(userEpisode.last_played).getTime() : undefined,
+            }
+          })
 
           loadedPodcasts.push({
             id: podcast.id,
@@ -242,7 +270,7 @@ export function PodcastProvider({ children }: { children: ReactNode }) {
 
         // Load playback speed from localStorage (this is user preference, not stored in DB)
         if (typeof window !== "undefined") {
-          const savedPlaybackSpeed = localStorage.getItem("playbackSpeed")
+          const savedPlaybackSpeed = localStorage.getItem(`playbackSpeed-${user.id}`)
           if (savedPlaybackSpeed) {
             setPlaybackSpeed(Number.parseFloat(savedPlaybackSpeed))
           }
@@ -258,14 +286,14 @@ export function PodcastProvider({ children }: { children: ReactNode }) {
     }
 
     loadUserData()
-  }, [user, supabase])
+  }, [user, supabase, podcasts.length])
 
   // Save playback speed to localStorage when it changes
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      localStorage.setItem("playbackSpeed", playbackSpeed.toString())
+    if (typeof window !== "undefined" && user) {
+      localStorage.setItem(`playbackSpeed-${user.id}`, playbackSpeed.toString())
     }
-  }, [playbackSpeed])
+  }, [playbackSpeed, user])
 
   // Clean up audio on unmount
   useEffect(() => {
@@ -458,16 +486,64 @@ export function PodcastProvider({ children }: { children: ReactNode }) {
       })),
     )
 
-    // Update in Supabase
+    // Update history state to reflect the new progress
+    setHistory((prevHistory) => {
+      const existingIndex = prevHistory.findIndex((ep) => ep.id === episode.id)
+      if (existingIndex !== -1) {
+        const updatedHistory = [...prevHistory]
+        updatedHistory[existingIndex] = {
+          ...updatedHistory[existingIndex],
+          progress: roundedProgress,
+          lastPlayed: Date.now(),
+        }
+        return updatedHistory.sort((a, b) => (b.lastPlayed || 0) - (a.lastPlayed || 0))
+      }
+      return prevHistory
+    })
+
     try {
-      await supabase
-        .from("episodes")
-        .update({
+      // Check if user_episode record exists
+      const { data: existingUserEpisode, error: checkError } = await supabase
+        .from("user_episodes")
+        .select("*")
+        .eq("user_id", user.id)
+        .eq("episode_id", episode.id)
+        .single()
+
+      if (checkError && checkError.code !== "PGRST116") {
+        console.error("Error checking user episode:", checkError)
+        return
+      }
+
+      if (existingUserEpisode) {
+        // Update existing record
+        const { error: updateError } = await supabase
+          .from("user_episodes")
+          .update({
+            progress: roundedProgress,
+            played: true,
+            last_played: new Date().toISOString(),
+          })
+          .eq("user_id", user.id)
+          .eq("episode_id", episode.id)
+
+        if (updateError) {
+          console.error("Error updating user episode:", updateError)
+        }
+      } else {
+        // Create new record
+        const { error: insertError } = await supabase.from("user_episodes").insert({
+          user_id: user.id,
+          episode_id: episode.id,
           progress: roundedProgress,
           played: true,
           last_played: new Date().toISOString(),
         })
-        .eq("id", episode.id)
+
+        if (insertError) {
+          console.error("Error inserting user episode:", insertError)
+        }
+      }
     } catch (error) {
       console.error("Error updating episode progress:", error)
     }
@@ -494,15 +570,48 @@ export function PodcastProvider({ children }: { children: ReactNode }) {
       })),
     )
 
-    // Update in Supabase
     try {
-      await supabase
-        .from("episodes")
-        .update({
+      // Check if user_episode record exists
+      const { data: existingUserEpisode, error: checkError } = await supabase
+        .from("user_episodes")
+        .select("*")
+        .eq("user_id", user.id)
+        .eq("episode_id", episode.id)
+        .single()
+
+      if (checkError && checkError.code !== "PGRST116") {
+        console.error("Error checking user episode:", checkError)
+        return
+      }
+
+      if (existingUserEpisode) {
+        // Update existing record
+        const { error: updateError } = await supabase
+          .from("user_episodes")
+          .update({
+            played: true,
+            last_played: new Date().toISOString(),
+          })
+          .eq("user_id", user.id)
+          .eq("episode_id", episode.id)
+
+        if (updateError) {
+          console.error("Error updating user episode played status:", updateError)
+        }
+      } else {
+        // Create new record
+        const { error: insertError } = await supabase.from("user_episodes").insert({
+          user_id: user.id,
+          episode_id: episode.id,
           played: true,
+          progress: 0,
           last_played: new Date().toISOString(),
         })
-        .eq("id", episode.id)
+
+        if (insertError) {
+          console.error("Error inserting user episode played status:", insertError)
+        }
+      }
     } catch (error) {
       console.error("Error marking episode as played:", error)
     }
@@ -547,19 +656,22 @@ export function PodcastProvider({ children }: { children: ReactNode }) {
     if (!user) throw new Error("You must be logged in to add podcasts")
 
     try {
-      // First, check if podcast already exists for this user
-      const { data: existingPodcasts } = await supabase
-        .from("podcasts")
-        .select("*")
-        .eq("feed_url", feedUrl)
+      // First, check if the user already has this podcast
+      const { data: existingUserPodcasts } = await supabase
+        .from("user_podcasts")
+        .select("podcast_id, podcasts!inner(feed_url)")
         .eq("user_id", user.id)
+        .eq("podcasts.feed_url", feedUrl)
+        .single()
 
-      if (existingPodcasts && existingPodcasts.length > 0) {
+      if (existingUserPodcasts) {
         throw new Error("Podcast already exists in your library")
       }
 
       // Fetch podcast data from API with better error handling
       const response = await fetch(`/api/parse-feed?url=${encodeURIComponent(feedUrl)}`)
+
+      // The API route handles creating the user-podcast relationship if the podcast already exists
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}))
@@ -573,37 +685,50 @@ export function PodcastProvider({ children }: { children: ReactNode }) {
         throw new Error("Invalid podcast data received")
       }
 
-      // Generate a UUID for the podcast
-      const podcastId = uuidv4()
+      // Check if the podcast already exists in the database
+      const { data: existingPodcast } = await supabase.from("podcasts").select("*").eq("feed_url", feedUrl).single()
 
-      // Insert podcast into Supabase
-      await supabase.from("podcasts").insert({
-        id: podcastId,
-        title: podcastData.title,
-        description: podcastData.description,
-        image_url: podcastData.imageUrl,
-        author: podcastData.author,
-        feed_url: feedUrl,
-        user_id: user.id,
-      })
+      let podcastId: string
 
-      // Insert episodes into Supabase
-      const episodesToInsert = podcastData.episodes.map((episode: any) => ({
-        id: episode.id,
-        title: episode.title,
-        description: episode.description,
-        audio_url: episode.audioUrl,
-        image_url: episode.imageUrl,
-        pub_date: episode.pubDate,
-        duration: episode.duration,
-        podcast_id: podcastId,
-        played: false,
-        progress: 0,
-      }))
+      if (existingPodcast) {
+        // Podcast exists, use its ID
+        podcastId = existingPodcast.id
+      } else {
+        // Podcast doesn't exist, create it
+        podcastId = uuidv4()
 
-      if (episodesToInsert.length > 0) {
-        await supabase.from("episodes").insert(episodesToInsert)
+        // Insert podcast into Supabase
+        await supabase.from("podcasts").insert({
+          id: podcastId,
+          title: podcastData.title,
+          description: podcastData.description,
+          image_url: podcastData.imageUrl,
+          author: podcastData.author,
+          feed_url: feedUrl,
+        })
+
+        // Insert episodes into Supabase
+        const episodesToInsert = podcastData.episodes.map((episode: any) => ({
+          id: episode.id,
+          title: episode.title,
+          description: episode.description,
+          audio_url: episode.audioUrl,
+          image_url: episode.imageUrl,
+          pub_date: episode.pubDate,
+          duration: episode.duration,
+          podcast_id: podcastId,
+        }))
+
+        if (episodesToInsert.length > 0) {
+          await supabase.from("episodes").insert(episodesToInsert)
+        }
       }
+
+      // Create the user-podcast relationship
+      await supabase.from("user_podcasts").insert({
+        user_id: user.id,
+        podcast_id: podcastId,
+      })
 
       // Update local state
       const formattedEpisodes: Episode[] = podcastData.episodes.map((episode: any) => ({
@@ -642,8 +767,8 @@ export function PodcastProvider({ children }: { children: ReactNode }) {
     if (!user) return
 
     try {
-      // Delete from Supabase (cascade will delete episodes)
-      await supabase.from("podcasts").delete().eq("id", id).eq("user_id", user.id)
+      // Delete the user-podcast relationship
+      await supabase.from("user_podcasts").delete().eq("podcast_id", id).eq("user_id", user.id)
 
       // Update local state
       setPodcasts((prev) => prev.filter((podcast) => podcast.id !== id))
@@ -741,6 +866,11 @@ export function PodcastProvider({ children }: { children: ReactNode }) {
 
   const updateVolume = (newVolume: number) => {
     setVolume(newVolume)
+
+    // Save volume preference to localStorage for this user
+    if (user && typeof window !== "undefined") {
+      localStorage.setItem(`volume-${user.id}`, newVolume.toString())
+    }
   }
 
   const updatePlaybackSpeed = (speed: number) => {
@@ -819,8 +949,14 @@ export function PodcastProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-      // Delete all user data from Supabase
-      await supabase.from("podcasts").delete().eq("user_id", user.id)
+      // Delete all user-podcast relationships
+      await supabase.from("user_podcasts").delete().eq("user_id", user.id)
+
+      // Delete all user-episode relationships
+      await supabase.from("user_episodes").delete().eq("user_id", user.id)
+
+      // Delete all bookmarks
+      await supabase.from("bookmarks").delete().eq("user_id", user.id)
 
       // Clear all state
       setPodcasts([])
@@ -834,6 +970,17 @@ export function PodcastProvider({ children }: { children: ReactNode }) {
       console.error("Error clearing user data:", error)
     }
   }
+
+  // Load user preferences when component mounts
+  useEffect(() => {
+    if (user && typeof window !== "undefined") {
+      // Load volume preference
+      const savedVolume = localStorage.getItem(`volume-${user.id}`)
+      if (savedVolume) {
+        setVolume(Number.parseFloat(savedVolume))
+      }
+    }
+  }, [user])
 
   return (
     <PodcastContext.Provider

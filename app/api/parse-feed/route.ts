@@ -30,8 +30,6 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized - Please log in" }, { status: 401 })
   }
 
-  //console.log("Authenticated user:", session.user.id)
-
   const url = request.nextUrl.searchParams.get("url")
 
   if (!url) {
@@ -40,6 +38,60 @@ export async function GET(request: NextRequest) {
 
   try {
     console.log(`Fetching podcast feed from: ${url}`)
+
+    // Check if podcast already exists in the database
+    const { data: existingPodcast } = await supabase.from("podcasts").select("*").eq("feed_url", url).single()
+
+    // If podcast exists, check if user already has it
+    if (existingPodcast) {
+      const { data: userPodcast } = await supabase
+        .from("user_podcasts")
+        .select("*")
+        .eq("user_id", session.user.id)
+        .eq("podcast_id", existingPodcast.id)
+        .single()
+
+      if (userPodcast) {
+        return NextResponse.json({ error: "Podcast already exists in your library" }, { status: 400 })
+      }
+
+      // If podcast exists but user doesn't have it, create the user-podcast relationship
+      await supabase.from("user_podcasts").insert({
+        user_id: session.user.id,
+        podcast_id: existingPodcast.id,
+      })
+
+      // Fetch episodes and return
+      const { data: episodes } = await supabase
+        .from("episodes")
+        .select("*")
+        .eq("podcast_id", existingPodcast.id)
+        .order("pub_date", { ascending: false })
+
+      const formattedEpisodes = episodes.map((ep) => ({
+        id: ep.id,
+        title: ep.title,
+        description: ep.description || "",
+        audioUrl: ep.audio_url,
+        imageUrl: ep.image_url || existingPodcast.image_url || "",
+        pubDate: ep.pub_date || "",
+        duration: ep.duration || "",
+        podcastId: existingPodcast.id,
+        podcastTitle: existingPodcast.title,
+        played: false,
+        progress: 0,
+      }))
+
+      return NextResponse.json({
+        id: existingPodcast.id,
+        title: existingPodcast.title,
+        description: existingPodcast.description,
+        imageUrl: existingPodcast.image_url,
+        author: existingPodcast.author,
+        feedUrl: existingPodcast.feed_url,
+        episodes: formattedEpisodes,
+      })
+    }
 
     // Improved fetch with better error handling and timeout
     const controller = new AbortController()

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import Image from "next/image"
 import { formatDate } from "@/lib/utils"
 import { cn } from "@/lib/utils"
+import { useAuth } from "@/context/auth-context"
 
 interface EpisodeCardProps {
   episode: Episode
@@ -15,6 +16,7 @@ interface EpisodeCardProps {
 
 export function EpisodeCard({ episode, showPodcastTitle = true }: EpisodeCardProps) {
   const { currentEpisode, isPlaying, playEpisode, pauseEpisode } = usePodcast()
+  const { user } = useAuth()
 
   const isCurrentEpisode = currentEpisode?.id === episode.id
   const isCurrentlyPlaying = isCurrentEpisode && isPlaying
