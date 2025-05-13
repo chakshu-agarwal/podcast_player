@@ -11,5 +11,10 @@ export const supabase = createClient<Database>(supabaseUrl, supabaseAnonKey)
 export const createServerSupabaseClient = () => {
   const supabaseUrl = process.env.SUPABASE_URL!
   const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
+
+  if (!supabaseUrl || !supabaseServiceKey) {
+    throw new Error("Missing Supabase environment variables for server client")
+  }
+
   return createClient<Database>(supabaseUrl, supabaseServiceKey)
 }

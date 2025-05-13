@@ -6,6 +6,7 @@ import { useSupabaseClient } from "@supabase/auth-helpers-react"
 import { v4 as uuidv4 } from "uuid"
 import { AUDIO_PAUSE_EVENT } from "@/lib/events"
 import type { Database } from "@/types/supabase"
+import { updateEpisodeProgressAction } from "@/app/actions/episode-actions"
 
 export type Bookmark = {
   id: string
@@ -502,48 +503,8 @@ export function PodcastProvider({ children }: { children: ReactNode }) {
     })
 
     try {
-      // Check if user_episode record exists
-      const { data: existingUserEpisode, error: checkError } = await supabase
-        .from("user_episodes")
-        .select("*")
-        .eq("user_id", user.id)
-        .eq("episode_id", episode.id)
-        .single()
-
-      if (checkError && checkError.code !== "PGRST116") {
-        console.error("Error checking user episode:", checkError)
-        return
-      }
-
-      if (existingUserEpisode) {
-        // Update existing record
-        const { error: updateError } = await supabase
-          .from("user_episodes")
-          .update({
-            progress: roundedProgress,
-            played: true,
-            last_played: new Date().toISOString(),
-          })
-          .eq("user_id", user.id)
-          .eq("episode_id", episode.id)
-
-        if (updateError) {
-          console.error("Error updating user episode:", updateError)
-        }
-      } else {
-        // Create new record
-        const { error: insertError } = await supabase.from("user_episodes").insert({
-          user_id: user.id,
-          episode_id: episode.id,
-          progress: roundedProgress,
-          played: true,
-          last_played: new Date().toISOString(),
-        })
-
-        if (insertError) {
-          console.error("Error inserting user episode:", insertError)
-        }
-      }
+      // Use the server action to update the episode progress
+      await updateEpisodeProgressAction(user.id, episode.id, roundedProgress, true)
     } catch (error) {
       console.error("Error updating episode progress:", error)
     }
@@ -571,47 +532,8 @@ export function PodcastProvider({ children }: { children: ReactNode }) {
     )
 
     try {
-      // Check if user_episode record exists
-      const { data: existingUserEpisode, error: checkError } = await supabase
-        .from("user_episodes")
-        .select("*")
-        .eq("user_id", user.id)
-        .eq("episode_id", episode.id)
-        .single()
-
-      if (checkError && checkError.code !== "PGRST116") {
-        console.error("Error checking user episode:", checkError)
-        return
-      }
-
-      if (existingUserEpisode) {
-        // Update existing record
-        const { error: updateError } = await supabase
-          .from("user_episodes")
-          .update({
-            played: true,
-            last_played: new Date().toISOString(),
-          })
-          .eq("user_id", user.id)
-          .eq("episode_id", episode.id)
-
-        if (updateError) {
-          console.error("Error updating user episode played status:", updateError)
-        }
-      } else {
-        // Create new record
-        const { error: insertError } = await supabase.from("user_episodes").insert({
-          user_id: user.id,
-          episode_id: episode.id,
-          played: true,
-          progress: 0,
-          last_played: new Date().toISOString(),
-        })
-
-        if (insertError) {
-          console.error("Error inserting user episode played status:", insertError)
-        }
-      }
+      // Use the server action to mark the episode as played
+      await updateEpisodeProgressAction(user.id, episode.id, 0, true)
     } catch (error) {
       console.error("Error marking episode as played:", error)
     }
